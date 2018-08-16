@@ -219,11 +219,13 @@ class LinearInvariantConv(nn.Module):
         
         if (invarianceLevel == 4):
             self.convParams = Parameter(torch.Tensor(layerSize, inputDepth, 4))
-            self.Basis = Parameter(torch.Tensor([[[1, -1, 0], [-1, 1, 0], [0, 0, 0]], 
+            self.Basis = torch.Tensor([[[1, -1, 0], [-1, 1, 0], [0, 0, 0]], 
                                                  [[0, -1, 1], [0, 1, -1], [0, 0, 0]], 
                                                  [[0, 0, 0], [-1, 1, 0], [1, -1, 0]],
-                                                 [[0, 0, 0], [0, 1, -1], [0, -1, 1]]]), requires_grad = False)
-       
+                                                 [[0, 0, 0], [0, 1, -1], [0, -1, 1]]])
+            if torch.cuda.is_available():
+                self.Basis = self.Basis.cuda()
+        
         nn.init.uniform_(self.convParams, -0.1, 0.1)
         
     def forward(self, x):   
@@ -235,7 +237,7 @@ class LinearInvariantConv(nn.Module):
                 reduct = self.convParams.view(self.sh[0], self.sh[1], -1).mean(dim=2).view(self.sh[0],self.sh[1],1,1)
             kernel = self.convParams - reduct
         if (self.invarianceLevel == 4):
-            kernel = torch.einsum("ijk,kmn->ijmn", (self.convParams, self.Basis))
+            kernel = torch.einsum("ijk,kmn->ijmn", (self.convParams, Variable(self.Basis, requires_grad = False)))
         
         return F.conv2d(x, kernel, bias = self.biasParams, padding = 1)    
     
