@@ -17,8 +17,106 @@ class BaseNet(nn.Module):
     def printNet(self):
         print(self.netName + " will be trained!")
         print("Number of parameters: ", self.numParams())
+
+        
+class NearestNeighborNet(BaseNet):
+    def __init__(self, numBlocks, numNeighbors):
+        super().__init__()
+        self.numBlocks = numBlocks
+        self.numNeighbors = numNeighbors
+        self.neighbors = torch.nn.Parameter((torch.rand(numBlocks, numNeighbors,3, 32, 32)-0.5)*1)
+        self.fc = nn.Linear(numBlocks, 10)
+    
+    def forward(self, x):
+        dist = (torch.abs(x.unsqueeze(1).unsqueeze(1) - self.neighbors)).view(x.shape[0], self.numBlocks, self.numNeighbors, -1)\
+        .max(dim = 3)[0].min(dim = 2)[0]*(-1.0)
+        return self.fc(dist)
+    
+
+def expandConv(x, cuda_av, rows = 3, cols = 3):
+    dev = None
+    if (cuda_av):
+        dev = "cuda:0"
+    y = torch.zeros(x.shape[0], x.shape[1], rows * cols, x.shape[2], x.shape[3], device = dev)
+    ind = 0
+    rowBound = int((rows - 1)/2)
+    colBound = int((cols - 1)/2)
+    for row in range(-rowBound, rowBound + 1):
+        for col in range(-colBound, colBound+1):
+            y[:, :, ind,\
+            max(row, 0): min(x.shape[2]+row, x.shape[2]), max(col, 0): min(x.shape[3]+col, x.shape[3])] \
+            =x[:,:,max(-row, 0): min(x.shape[2]-row, x.shape[2]), max(-col, 0): min(x.shape[3]-col, x.shape[3])]
+            ind += 1
+    return y  
         
         
+class ConvNearestNeightbor(nn.Module):
+    def __init__(self, num, depth, rows = 3, cols = 3):
+        super().__init__()
+        self.num = num
+        self.rows = rows
+        self.cols = cols
+        self.neighbors = torch.nn.Parameter((torch.rand(num, depth, 9)-0.5)*1)
+        self.cuda_av = torch.cuda.is_available()
+    
+    def forward(self, x):
+        y = expandConv(x, self.cuda_av)
+        diff = y.unsqueeze(1) - self.neighbors.unsqueeze(0).unsqueeze(4).unsqueeze(5)
+        return torch.abs(diff).max(dim = 3)[0].reshape(x.shape[0], self.num * x.shape[1], x.shape[2], x.shape[3])
+    
+
+class ConvNNN(BaseNet):
+    def __init__(self, numBlocks, numFeatures):
+        super().__init__()
+        self.numFeatures = numFeatures
+        self.numBlocks = numBlocks
+        self.convNNList = nn.ModuleList()
+        depth = 3
+        for i in range(numBlocks):
+            self.convNNList.append(ConvNearestNeightbor(numFeatures, depth))
+            depth = depth * numFeatures
+        self.pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Linear(depth, 10)
+        
+    def forward(self, x):
+        for i in range(self.numBlocks):
+            x = self.convNNList[i](x)
+        x = -x
+        x = self.pool(x)
+        x.squeeze_()
+        return self.fc(x)
+    
+    
+    
+    
+class QuadraticNet(BaseNet):
+    def __init__(self, numBlocks, blockSize):
+        super().__init__()
+        self.netName = "Quadratic Net"
+        self.numBlocks = numBlocks
+        self.blockSize = blockSize
+        
+        self.convList = nn.ModuleList()
+        
+        size = 3
+        for i in range(numBlocks):
+            self.convList.append(nn.Conv2d(size, blockSize, 3, padding = 1))
+            size += blockSize
+        
+        self.pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Linear(size, 10)
+
+    def forward(self, x):
+        for i in range(self.numBlocks):
+            y = self.convList[i](x)
+            y = F.relu(y)
+            x = torch.cat((x, y), dim = 1)
+            print(x.shape)
+        x = self.pool(-x).squeeze()
+        x = self.fc(x)
+        return x 
+    
+    
         
         
 class _KWinnersTakeAllFunction(torch.autograd.Function):
@@ -172,7 +270,6 @@ class SimplifiedLogicLayer(nn.Module):
         #return torch.cat((x, x.min(dim=1, keepdim = True)[0]), dim = 1)
     
     
-    
 class SimplifiedLogicNet(BaseNet):
     def __init__(self, nLayers, layerSize):
         super().__init__()
@@ -218,6 +315,59 @@ class SimplifiedLogicNet(BaseNet):
         
         x = self.fc(x)
         return x
+    
+    
+    
+    
+    
+def normNonLin(input):
+    return torch.exp(-torch.abs(input))
+
+
+
+class DenseNormNet(BaseNet):
+    def __init__(self, numBlocks, blockSize):
+        super().__init__()
+        self.netName = "Dense Relu Net"
+        self.numBlocks = numBlocks
+        self.blockSize = blockSize
+        
+        self.convList1 = nn.ModuleList()
+        self.convList2 = nn.ModuleList()
+        self.convList3 = nn.ModuleList()
+        
+        size = 3
+        for i in range(numBlocks):
+            self.convList1.append(nn.Conv2d(size, blockSize, 3, padding = 1))
+            size += blockSize
+            
+        for i in range(numBlocks):
+            self.convList2.append(nn.Conv2d(size, blockSize, 3, padding = 1))
+            size += blockSize
+            
+        for i in range(numBlocks):
+            self.convList3.append(nn.Conv2d(size, blockSize, 3, padding = 1))
+            size += blockSize
+        
+        self.pool1 = nn.AvgPool2d(2, 2)
+        self.pool2 = nn.AvgPool2d(2, 2)
+        self.pool3 = nn.AvgPool2d(8, 8)
+        self.fc = nn.Linear(size, 10)
+
+    def forward(self, x):
+        for i in range(self.numBlocks):
+            x = torch.cat((x, normNonLin(self.convList1[i](x))), dim = 1)
+        x = self.pool1(x)
+        for i in range(self.numBlocks):
+            x = torch.cat((x, normNonLin(self.convList2[i](x))), dim = 1)
+        x = self.pool2(x)
+        for i in range(self.numBlocks):
+            x = torch.cat((x, normNonLin(self.convList3[i](x))), dim = 1)
+        x = self.pool3(x)
+        x = x.view(-1, 3 + 3 * self.numBlocks * self.blockSize)
+        x = self.fc(x)
+        return x
+    
     
     
 
@@ -515,6 +665,13 @@ def maxmin_fc(input):
     min_t = input.clamp(max=0)
     return torch.cat((max_t, min_t), dim=1)
 
+
+def MaxMinPairwise(input):
+    res = input.view(input.shape[0], int(input.shape[1] / 2), 2, input.shape[2], input.shape[3])
+    return torch.cat((res.max(dim = 2)[0], res.min(dim = 2)[0]), dim = 1)
+
+
+
 class DenseMaxMinNet(BaseNet):
     def __init__(self, numBlocks, blockSize):
         super().__init__()
@@ -662,6 +819,9 @@ class ColumnCrop(nn.Module):
     
     
     
+    
+
+    
 class FullColumnCropPool(nn.Module):
     def __init__(self, pRemain):
         super().__init__()
@@ -681,13 +841,25 @@ class Identity(nn.Module):
     def forward(self, x):
         return x
     
-        
+    
+class LinearTransform(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        self.num_features = num_features
+        self.scale = Parameter(torch.Tensor(num_features))
+        self.bias  = Parameter(torch.Tensor(num_features))
+        nn.init.uniform_(self.scale, -1, 1)
+        nn.init.uniform_(self.bias, -1, 1)
+    
+    def forward(self, x):
+        return x * self.scale.view(1, self.num_features, 1, 1) + self.bias.view(1, self.num_features, 1, 1)
         
         
 class DenseBlock(nn.Module):
     def __init__(self, initSize, numBlocks, blockSize, bottleneckSize, 
                  dropRegime = "None", pDrop = 0, bottleDrop = True, convDrop = False, 
-                 bn = True, nonlin = 'Relu'):
+                 bn = True, nonlin = 'Relu', bottleBn = True, bottleNonlin = True, bnBeforeConv = True,
+                 bnRegime = "bn", bias = False):
         super().__init__()
         self.initSize = initSize
         self.numBlocks = numBlocks
@@ -696,17 +868,282 @@ class DenseBlock(nn.Module):
         self.bottleDrop = bottleDrop
         self.convDrop = convDrop
         self.bn = bn
-        self.bias = True
+        self.bias = bias
         self.nonlin = nonlin
         self.pDrop = pDrop
+        self.bottleBn = bottleBn
+        self.bottleNonlin = bottleNonlin
+        self.bnBeforeConv = bnBeforeConv
         
         assert dropRegime in ["None", "Drop", "ColumnDrop"]
-        assert nonlin in ["Relu", "MaxMin"]
+        assert nonlin in ["Identity", "Relu", "MaxMin", "MaxMinPairwise"]
+        assert bnRegime in ["bn", "ln"]
+        
+        if (bnRegime == "bn"):
+            bnModule = nn.BatchNorm2d
+        else:
+            bnModule = LinearTransform
         
         self.vertConvList = nn.ModuleList()
         self.convList = nn.ModuleList()
         if (self.bn):
             self.bnList = nn.ModuleList()
+        
+        if (self.bottleBn):
+            self.bottleBnList = nn.ModuleList()
+            
+        if (bnBeforeConv):
+            self.convBnList1 = nn.ModuleList()
+            self.convBnList2 = nn.ModuleList()
+        
+        self.drop = Identity()
+        if (dropRegime == "Drop"):
+            self.drop = nn.Dropout(self.pDrop)
+        if (dropRegime == "ColumnDrop"):
+            self.drop = ColumnDrop(self.pDrop, 0)
+        
+        if (self.nonlin == "Identity"):
+            self.activation = Identity()
+        if (self.nonlin == "Relu"):
+            self.activation = F.relu
+        if (self.nonlin == "MaxMin"):
+            self.activation = maxmin_fc
+        if (self.nonlin == "MaxMinPairwise"):
+            self.activation = MaxMinPairwise
+        
+        if (nonlin == "MaxMin"):
+            mainSizeInc = 2 * blockSize
+        else:
+            mainSizeInc = blockSize
+            
+        convSizeInp = bottleneckSize
+        if (bottleNonlin and nonlin == "MaxMin"):
+            convSizeInp = 2 * bottleneckSize
+        
+        size = self.initSize
+        for i in range(numBlocks):
+            self.vertConvList.append(nn.Conv2d(size, bottleneckSize, 1, padding = 0, bias = self.bias))
+            if (self.bottleBn):
+                self.bottleBnList.append(bnModule(num_features = bottleneckSize))
+            if (self.bnBeforeConv):
+                self.convBnList1.append(bnModule(num_features = convSizeInp))
+            self.convList.append(nn.Conv2d(convSizeInp, blockSize, 3, padding = 1, bias = self.bias))
+            if (self.bn):
+                self.bnList.append(bnModule(num_features = blockSize))
+            if (self.bnBeforeConv):
+                self.convBnList2.append(bnModule(num_features = mainSizeInc))
+            size += mainSizeInc
+        
+        self.finalSize = size
+            
+    def forward(self, x):
+        for i in range(self.numBlocks):
+            y = self.vertConvList[i](x)
+            if (self.bottleBn):
+                y = self.bottleBnList[i](y)
+            if (self.bottleNonlin):
+                y = self.activation(y)
+            if (self.bnBeforeConv):
+                y = self.convBnList1[i](y)
+            if (self.bottleDrop):
+                y = self.drop(y)
+                
+            y = self.convList[i](y)
+            if (self.bn):
+                y = self.bnList[i](y)
+            y = self.activation(y)
+            if (self.bnBeforeConv):
+                y = self.convBnList2[i](y)
+            if (self.convDrop):
+                y = self.drop(y)
+             
+            x = torch.cat((x, y), dim = 1)
+        return x
+    
+    
+class DenseBlockChanged(nn.Module):
+    def __init__(self, initSize, numBlocks, blockSize, bottleneckSize, 
+                 dropRegime = "None", pDrop = 0, bottleDrop = True, convDrop = False, 
+                 bn = True, nonlin = 'Relu', bottleBn = True, bottleNonlin = True, bnRegime = "bn", 
+                 bnBeforeConv = False, bias = False):
+        super().__init__()
+        self.initSize = initSize
+        self.numBlocks = numBlocks
+        self.blockSize = blockSize
+        self.bottleneckSize = bottleneckSize
+        self.bottleDrop = bottleDrop
+        self.convDrop = convDrop
+        self.bn = bn
+        self.bias = bias
+        self.nonlin = nonlin
+        self.pDrop = pDrop
+        self.bottleBn = bottleBn
+        self.bottleNonlin = bottleNonlin
+        
+        assert dropRegime in ["None", "Drop", "ColumnDrop"]
+        assert nonlin in ["Identity", "Relu", "MaxMin", "MaxMinPairwise"]
+        assert bnRegime in ["bn", "ln"]
+        
+        if (bnRegime == "bn"):
+            bnModule = nn.BatchNorm2d
+        else:
+            bnModule = LinearTransform
+        
+        self.vertConvList = nn.ModuleList()
+        self.convList = nn.ModuleList()
+        if (self.bn):
+            self.bnList = nn.ModuleList()
+        
+        if (self.bottleBn):
+            self.bottleBnList = nn.ModuleList()
+        
+        self.drop = Identity()
+        if (dropRegime == "Drop"):
+            self.drop = nn.Dropout(self.pDrop)
+        if (dropRegime == "ColumnDrop"):
+            self.drop = ColumnDrop(self.pDrop, 0)
+        
+        if (self.nonlin == "Identity"):
+            self.activation = Identity()
+        if (self.nonlin == "Relu"):
+            self.activation = F.relu
+        if (self.nonlin == "MaxMin"):
+            self.activation = maxmin_fc
+        if (self.nonlin == "MaxMinPairwise"):
+            self.activation = MaxMinPairwise
+        
+        if (nonlin == "MaxMin"):
+            mainSizeInc = 2 * blockSize
+        else:
+            mainSizeInc = blockSize
+            
+        convSizeInp = bottleneckSize
+        if (bottleNonlin and nonlin == "MaxMin"):
+            convSizeInp = 2 * bottleneckSize
+        
+        size = self.initSize
+        for i in range(numBlocks):
+            if (self.bottleBn):
+                self.bottleBnList.append(bnModule(num_features = size))
+            self.vertConvList.append(nn.Conv2d(size, bottleneckSize, 1, padding = 0, bias = self.bias))
+            
+            if (self.bn):
+                self.bnList.append(bnModule(num_features = convSizeInp))
+            self.convList.append(nn.Conv2d(convSizeInp, blockSize, 3, padding = 1, bias = self.bias))
+            size += blockSize
+        
+        self.finalSize = size
+            
+    def forward(self, x):
+        for i in range(self.numBlocks):
+            if (self.bottleBn):
+                y = self.bottleBnList[i](x)
+            if (self.bottleNonlin):
+                y = self.activation(y)
+            y = self.vertConvList[i](y)
+            
+            if (self.bottleDrop):
+                y = self.drop(y)
+            
+            if (self.bn):
+                y = self.bnList[i](y)
+            y = self.activation(y)
+                            
+            y = self.convList[i](y)
+           
+            if (self.convDrop):
+                y = self.drop(y)
+             
+            x = torch.cat((x, y), dim = 1)
+        return x
+            
+        
+        
+class InputDependentTransition(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, 1, 3, padding = 1)
+    
+    def forward(self, x):
+        mask = self.conv(x)
+        m_sh = mask.shape
+        mask = F.softmax(mask.view(m_sh[0], m_sh[1], -1), dim = 2).view(m_sh)
+        return x.mul(mask).view(x.shape[0], x.shape[1], -1).mean(dim = 2)
+   
+    
+    
+class Transition(nn.Module):
+    def __init__(self, in_channels, out_channels, bn = True, nonlin = "Relu", 
+                 dropRegime = "None", pDrop = 0, finalPool = False, bnRegime = "bn", bias = False):
+        super().__init__()
+        self.bn = bn
+        self.nonlin = nonlin
+        self.bias = bias
+        self.pDrop = pDrop
+        self.finalPool = finalPool
+        if (bnRegime == "bn"):
+            bnM = nn.BatchNorm2d
+        else:
+            bnM = LinearTransform
+        
+        assert nonlin in ["Relu", "Identity", "MaxMinPairwise"]
+        
+        if (self.nonlin == "Identity"):
+            self.activation = Identity()
+        if (self.nonlin == "Relu"):
+            self.activation = F.relu
+        if (self.nonlin == "MaxMinPairwise"):
+            self.activation = MaxMinPairwise
+        
+        self.drop = Identity()
+        if (dropRegime == "Drop"):
+            self.drop = nn.Dropout(self.pDrop)
+        if (dropRegime == "ColumnDrop"):
+            self.drop = ColumnDrop(self.pDrop, 0)
+        
+        if (self.finalPool):
+            self.pool = nn.AdaptiveAvgPool2d(1)
+        
+        else:
+            if (self.bn):
+                self.bnModule = bnM(num_features = out_channels)
+            self.vertConv = nn.Conv2d(in_channels, out_channels, 1, padding = 0, bias = self.bias)
+            self.pool = nn.AvgPool2d(2, 2)
+        
+        
+    def forward(self, x):
+        if (not self.finalPool):
+            x = self.vertConv(x)
+            if (self.bn):
+                x = self.bnModule(x)
+            x = self.activation(x)
+        x = self.drop(x)
+        return self.pool(x)
+    
+    
+    
+class TransitionChanged(nn.Module):
+    def __init__(self, in_channels, out_channels, bn = True, nonlin = "Relu", 
+                 dropRegime = "None", pDrop = 0, finalPool = False, bnRegime = "bn", bias = False):
+        super().__init__()
+        self.bn = bn
+        self.nonlin = nonlin
+        self.bias = bias
+        self.pDrop = pDrop
+        self.finalPool = finalPool
+        if (bnRegime == "bn"):
+            bnM = nn.BatchNorm2d
+        else:
+            bnM = LinearTransform
+            
+        assert nonlin in ["Relu", "Identity", "MaxMinPairwise"]
+        
+        if (self.nonlin == "Identity"):
+            self.activation = Identity()
+        if (self.nonlin == "Relu"):
+            self.activation = F.relu
+        if (self.nonlin == "MaxMinPairwise"):
+            self.activation = MaxMinPairwise
         
         self.drop = Identity()
         if (dropRegime == "Drop"):
@@ -714,99 +1151,102 @@ class DenseBlock(nn.Module):
         if (dropRegime == "ColumnDrop"):
             self.drop = ColumnDrop(self.pDrop, 0)
             
-        if (self.nonlin == "Relu"):
-            self.activation = F.relu
-        if (self.nonlin == "MaxMin"):
-            self.activation = maxmin_fc
-            
-        size = self.initSize
-        for i in range(numBlocks):
-            self.vertConvList.append(nn.Conv2d(size, bottleneckSize, 1, padding = 0, bias = self.bias))
-            self.convList.append(nn.Conv2d(bottleneckSize, blockSize, 3, padding = 1, bias = self.bias))
-            if (self.bn):
-                self.bnList.append(nn.BatchNorm2d(num_features = blockSize))
-            if (nonlin == "MaxMin"):
-                size += 2 * blockSize
-            else:
-                size += blockSize
+        if (self.bn):
+            self.bnModule = bnM(num_features = in_channels)
         
-        self.finalSize = size
-            
-    def forward(self, x):
-        for i in range(self.numBlocks):
-            y = self.vertConvList[i](x)
-            if (self.bottleDrop):
-                y = self.drop(y)
-            y = self.convList[i](y)
-            if (self.convDrop):
-                y = self.drop(y)
-            if (self.bn):
-                y = self.bnList[i](y)
-            y = self.activation(y)
-            x = torch.cat((x, y), dim = 1)
-        return x
-            
-            
-            
-class Transition(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.bias = True
-        self.vertConv = nn.Conv2d(in_channels, out_channels, 1, padding = 0, bias = self.bias)
-        self.pool = nn.AvgPool2d(2, 2)
+        if (self.finalPool):
+            self.pool = nn.AdaptiveAvgPool2d(1)
+        else:
+            self.vertConv = nn.Conv2d(in_channels, out_channels, 1, padding = 0, bias = self.bias)
+            self.pool = nn.AvgPool2d(2, 2)
+        
         
     def forward(self, x):
-        return self.pool(self.vertConv(x))
+        if (self.bn):
+            x = self.bnModule(x)
+        x = self.activation(x)
+        if (not self.finalPool):
+            x = self.vertConv(x)
+        x = self.drop(x)
+        return self.pool(x)
+    
             
             
             
             
             
-#DenseBottleneckMaxMinNet 
 class GeneralConvNet(BaseNet):
     def __init__(self, numBlocks, blockSize, bottleneckSize, poolFraction = 0.5,
-                 dropRegime = "None", pDrop = 0, bottleDrop = True, convDrop = True, convPoolDrop = True, 
-                 innerPoolDrop = False, nonlin = "Relu", kwta = False, bn = True):
+                 convDropRegime = "None", bottleDrop = False, convDrop = False, pConvDrop = 0, convPoolDrop = False, 
+                 pPoolDrop = 0, poolDropRegime = "None", finalDrop = False, pFinalDrop = 0, nonlin = "Relu", kwta = False, bn = True, 
+                 bottleBn = True, bottleNonlin = True, transitionBn = True, transitionNonlin = True,
+                 bnBeforeConv = False, bnRegime = "bn", reversedBnOrder = True, bias = True, inputDependentPool = False):
         super().__init__()
         self.netName = "GeneralConvNet"
-        self.bias = True
+        self.bias = bias
+        self.numDenseLayers = len(numBlocks)
+        self.finalDrop = finalDrop
         
-        assert dropRegime in ["None", "Drop", "ColumnDrop"]
-        assert (dropRegime == "None" or pDrop > 0)
-        assert nonlin in ["Relu", "MaxMin"]
+        assert convDropRegime in ["None", "Drop", "ColumnDrop"]
+        assert poolDropRegime in ["None", "Drop", "ColumnDrop"]
+        assert nonlin in ["Identity", "Relu", "MaxMin", "MaxMinPairwise"]
+            
+        self.DenseLayers = nn.ModuleList()
+        self.TransitionLayers = nn.ModuleList()
         
-        self.denseBlock1 = DenseBlock(3, numBlocks, blockSize, bottleneckSize, dropRegime = dropRegime,
-                                      pDrop = pDrop, bottleDrop = bottleDrop, convDrop = convDrop, 
-                                      bn = bn, nonlin = nonlin)
+        if (reversedBnOrder):
+            transitionModule = TransitionChanged
+            denseModule = DenseBlockChanged
+        else:
+            transitionModule = Transition
+            denseModule = DenseBlock
         
-        in_size = self.denseBlock1.finalSize 
-        out_size = int(in_size * poolFraction)
-        self.transition1 = Transition(in_size, out_size)
+        if (transitionNonlin):
+            trNonLin = nonlin
+        else:
+            trNonLin = Identity()
         
-        self.denseBlock2 = DenseBlock(out_size, numBlocks, blockSize, bottleneckSize, dropRegime = dropRegime,
-                                      pDrop = pDrop, bottleDrop = bottleDrop, convDrop = convDrop, 
-                                      bn = bn, nonlin = nonlin)
+        self.finalDropFunc = Identity()
+        if (finalDrop):
+            self.finalDropFunc = nn.Dropout(pFinalDrop)
         
-        in_size = self.denseBlock2.finalSize 
-        out_size = int(in_size * poolFraction)
-        self.transition2 = Transition(in_size, out_size)
+        out_size = 2 * blockSize
+        self.init_conv = nn.Conv2d(3, out_size, 3, padding = 1, bias = self.bias)            
         
-        self.denseBlock3 = DenseBlock(out_size, numBlocks, blockSize, bottleneckSize, dropRegime = dropRegime,
-                                      pDrop = pDrop, bottleDrop = bottleDrop, convDrop = convDrop, 
-                                      bn = bn, nonlin = nonlin)
-        
-        out_size = self.denseBlock3.finalSize
-        self.transition3 = nn.AvgPool2d(8, 8)
-        
+        for layer in range(self.numDenseLayers):
+            self.DenseLayers.append(denseModule(out_size, numBlocks[layer], blockSize, bottleneckSize, dropRegime = convDropRegime,
+                                      pDrop = pConvDrop, bottleDrop = bottleDrop, convDrop = convDrop, 
+                                      bn = bn, nonlin = nonlin, bottleBn = bottleBn, bottleNonlin = bottleNonlin, 
+                                      bnBeforeConv = bnBeforeConv, bnRegime = bnRegime, bias = bias))
+            if (layer != self.numDenseLayers - 1):
+                in_size = self.DenseLayers[layer].finalSize 
+                out_size = int(in_size * poolFraction)
+                poolDropCoef = 0
+                if (poolDropRegime != "None"):
+                    poolDropCoef = pPoolDrop[layer]
+                self.TransitionLayers.append(transitionModule(in_size, out_size, bn = transitionBn, nonlin = trNonLin,
+                                        dropRegime = poolDropRegime, pDrop = poolDropCoef, 
+                                        finalPool = False, bnRegime = bnRegime, bias = bias))
+                                             
+        out_size = self.DenseLayers[self.numDenseLayers-1].finalSize
+        poolDropCoef = 0
+        if (poolDropRegime != "None"):
+            poolDropCoef = pPoolDrop[self.numDenseLayers - 1]
+            
+        if (inputDependentPool):
+            self.TransitionLayers.append(InputDependentTransition(out_size))
+        else:
+            self.TransitionLayers.append(transitionModule(out_size, out_size, nonlin = trNonLin, 
+                                                dropRegime = poolDropRegime, pDrop = poolDropCoef, 
+                                                finalPool = True, bnRegime = bnRegime, bias = bias))
         self.fc = nn.Linear(out_size, 10, bias = self.bias)
         
-        
-    
     def forward(self, x):
-        x = self.transition1(self.denseBlock1(x))
-        x = self.transition2(self.denseBlock2(x))
-        x = self.transition3(self.denseBlock3(x))
-        x = x.squeeze()        
+        x = self.init_conv(x)
+        for i in range(self.numDenseLayers):
+            x = self.TransitionLayers[i](self.DenseLayers[i](x))
+        x = x.squeeze()   
+        x = self.finalDropFunc(x)
         x = self.fc(x)
         return x
         
